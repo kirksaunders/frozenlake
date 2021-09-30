@@ -10,7 +10,33 @@ random.seed(0)
 #from gym.envs.toy_text import FrozenLakeEnv
 from frozen_lake import FrozenLakeEnv
 
-MAX_ITERATIONS = 1000
+MAX_ITERATIONS = 100
+
+def evaluate(env, pi, num_eps=100):
+    total_reward = 0
+    for i in range(num_eps):
+        state, done = env.reset(), False
+        it = 0
+        while not done and it < MAX_ITERATIONS:
+            action = pi[state]
+            state, reward, done, _ = env.step(action)
+            total_reward += reward
+            it += 1
+    print("Total reward is {} out of {} episodes. Average reward per episode is {}".format(total_reward, num_eps, total_reward / num_eps))
+
+def get_action_value(env, state, action, v, gamma):
+    value = 0
+    for probability, next_state, reward, _ in env.P[state][action]:
+            value += probability * (reward + gamma*v[next_state])
+
+    return value
+
+def get_action_values(env, state, v, gamma):
+    values = np.zeros(env.nA)
+    for action in range(env.nA):
+        values[action] = get_action_value(env, state, action, v, gamma)
+
+    return values
 
 def value_iteration(env, theta, gamma):
     # Initialize state value function to all 0's
@@ -20,15 +46,9 @@ def value_iteration(env, theta, gamma):
     while True:
         delta = 0
         for state in range(env.nS):
-            old_v = v[state]
-            new_v = None
-            for action in range(env.nA):
-                value = 0
-                for p in env.P[state][action]:
-                    value += p[0] * (p[2] + gamma*v[p[1]])
-                new_v = value if new_v == None else max(new_v, value)
+            new_v = np.max(get_action_values(env, state, v, gamma))
+            delta = max(delta, abs(v[state] - new_v))
             v[state] = new_v
-            delta = max(delta, abs(old_v - new_v))
 
         if delta < theta:
             break
@@ -36,16 +56,7 @@ def value_iteration(env, theta, gamma):
     # Determine optimal deterministic policy from value function
     pi = np.zeros(env.nS).astype(int)
     for state in range(env.nS):
-        best_action = None
-        best_value = None
-        for action in range(env.nA):
-            value = 0
-            for p in env.P[state][action]:
-                value += p[0] * (p[2] + gamma*v[p[1]])
-            if best_action == None or value > best_value:
-                best_action = action
-                best_value = value
-        pi[state] = best_action
+        pi[state] = np.argmax(get_action_values(env, state, v, gamma))
 
     return (v, pi)
 
@@ -62,12 +73,9 @@ def policy_iteration(env, theta, gamma):
         while True:
             delta = 0
             for state in range(env.nS):
-                old_v = v[state]
-                new_v = 0
-                for p in env.P[state][pi[state]]:
-                    new_v += p[0] * (p[2] + gamma*v[p[1]])
+                new_v = get_action_value(env, state, pi[state], v, gamma)
+                delta = max(delta, abs(v[state] - new_v))
                 v[state] = new_v
-                delta = max(delta, abs(old_v - new_v))
 
             if delta < theta:
                 break
@@ -75,38 +83,17 @@ def policy_iteration(env, theta, gamma):
         # Perform policy improvement
         stable = True
         for state in range(env.nS):
-            old_action = pi[state]
-            best_action = None
-            best_value = None
-            for action in range(env.nA):
-                value = 0
-                for p in env.P[state][action]:
-                    value += p[0] * (p[2] + gamma*v[p[1]])
-                if best_action == None or value > best_value:
-                    best_action = action
-                    best_value = value
-            pi[state] = best_action
-            if old_action != best_action:
+            best_action = np.argmax(get_action_values(env, state, v, gamma))
+            if pi[state] != best_action:
                 stable = False
+            pi[state] = best_action
 
         if stable:
             break
 
     return (v, pi)
 
-def evaluate(env, pi, num_eps=100):
-    total_reward = 0
-    for i in range(num_eps):
-        state, done = env.reset(), False
-        it = 0
-        while not done and it < MAX_ITERATIONS:
-            action = pi[state]
-            state, reward, done, _ = env.step(action)
-            total_reward += reward
-            it += 1
-    print("Total reward is {} out of {} episodes ({}%)".format(total_reward, num_eps, (total_reward / num_eps)*100))
-
-def monte_carlo(env, gamma):
+def monte_carlo(env, gamma, epsilon):
     q = np.random.rand(env.nS, env.nA)
     c = np.zeros((env.nS, env.nA))
     pi = np.zeros(env.nS).astype(int)
@@ -121,14 +108,17 @@ def monte_carlo(env, gamma):
         it = 0
         while not done and it < MAX_ITERATIONS:
             s.append(state)
-            action = env.action_space.sample()
+            if random.random() > epsilon:
+                action = pi[state]
+            else:
+                action = env.action_space.sample()
             state, reward, done, _ = env.step(action)
             a.append(action)
             r.append(reward)
             it += 1
 
-        g = 0
-        w = 1
+        g = 0.0
+        w = 1.0
         for t in reversed(range(len(s))):
             g = gamma*g + r[t]
             c[s[t], a[t]] += w
@@ -137,7 +127,7 @@ def monte_carlo(env, gamma):
 
             if a[t] != pi[s[t]]:
                 break
-            w *= env.nA
+            w /= (1.0 - epsilon) + epsilon / env.nA
 
         iterations += 1
         if iterations % 10000 == 0:
@@ -146,6 +136,7 @@ def monte_carlo(env, gamma):
             
 def q_learning(env, gamma, alpha, epsilon):
     q = np.zeros((env.nS, env.nA))
+    pi = np.zeros(env.nS).astype(int)
 
     iterations = 0
     while True:
@@ -153,20 +144,18 @@ def q_learning(env, gamma, alpha, epsilon):
         state, done = env.reset(), False
         while not done and it < MAX_ITERATIONS:
             if random.random() > epsilon:
-                action = np.argmax(q[state, :])
+                action = pi[state]
             else:
-                action = np.random.choice(np.arange(0, env.nA))
+                action = env.action_space.sample()
             
             new_state, reward, done, _ = env.step(action)
             q[state, action] += alpha * (reward + gamma*np.max(q[new_state, :]) - q[state, action])
+            pi[state] = np.argmax(q[state, :])
             state = new_state
 
         iterations += 1
         if iterations % 10000 == 0:
             print("{} iterations of q-learning completed, evaluating policy".format(iterations))
-            pi = np.zeros(env.nS).astype(int)
-            for i in range(env.nS):
-                pi[i] = np.argmax(q[i, :])
             evaluate(env, pi)
 
 def main():
@@ -174,13 +163,13 @@ def main():
     env = FrozenLakeEnv(map_name="4x4", is_slippery=True)
     env.seed(0) #set env seed
 
-    v, pi = value_iteration(env, 1e-6, 0.999)
-    #v, pi = policy_iteration(env, 1e-6, 0.999)
+    #v, pi = value_iteration(env, 1e-3, 1)
+    #v, pi = policy_iteration(env, 1e-0, 1)
 
-    evaluate(env, pi)
+    #evaluate(env, pi)
 
-    #monte_carlo(env, 0.999)
-    q_learning(env, 0.999, 0.1, 0.2)
+    #monte_carlo(env, 1, 0.1)
+    q_learning(env, 1, 0.01, 0.1)
 
     env.close()
 
